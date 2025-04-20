@@ -16,6 +16,25 @@ from LTSF_DDBM.diffusion.ddbm.unet_conv1d import UNetConv1DModel
 from LTSF_DDBM.diffusion.ddbm.unet import UNetModel
 from  LTSF_DDBM.diffusion.ddbm import logger
 
+class EarlyStopping:
+    def __init__(self, patience=10, delta=1e-4):
+        self.patience = patience
+        self.counter = 0
+        self.best_loss = None
+        self.early_stop = False
+        self.delta = delta
+
+    def __call__(self, val_loss):
+        if self.best_loss is None:
+            self.best_loss = val_loss
+        elif val_loss > self.best_loss - self.delta:
+            self.counter += 1
+            if self.counter >= self.patience:
+                self.early_stop = True
+        else:
+            self.best_loss = val_loss
+            self.counter = 0
+
 def train_unet(args):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -61,7 +80,9 @@ def train_unet(args):
             condition_mode=None,
         ).to(device)
 
-        optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
+        optimizer = torch.optim.Adam(model.parameters(), lr=1e-4)
+        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=5)
+        early_stopper = EarlyStopping(patience=5)
         criterion = nn.MSELoss()
 
         model.train()
@@ -71,8 +92,8 @@ def train_unet(args):
                 x, y = F.pad(x, (0, 25)), F.pad(y, (0, 25))
                 # x = x.permute(0, 2, 1)  # (B, T, F) → (B, F, T)
                 # y = y.permute(0, 2, 1)  # (B, T, F) → (B, F, T)
-                print("x.shape:",x.shape)   
-                print("y.shape:",y.shape)
+                # print("x.shape:",x.shape)   
+                # print("y.shape:",y.shape)
                 # print("x:",x)
                 # print("y:",y)
                 x = x.float().to(device)
@@ -87,7 +108,13 @@ def train_unet(args):
                 optimizer.step()
                 epoch_loss += loss.item()
 
-            print(f"[{dataset_name} | Epoch {epoch+1}] Loss: {epoch_loss/len(train_loader):.4f}")
+            epoch_avg_loss = epoch_loss / len(train_loader)
+            print(f"[{dataset_name} | Epoch {epoch+1}] Loss: {epoch_avg_loss:.4f}")
+            scheduler.step(epoch_avg_loss)
+            early_stopper(epoch_avg_loss)
+            if early_stopper.early_stop:
+                print(f"Early stopping at epoch {epoch+1} for {dataset_name}")
+                break
 
         model_path = f"/home/zzx/projects/rrg-timsbc/zzx/LTSF_DDBM/diffusion/unet1d_{dataset_name}.pth"
         torch.save(model.state_dict(), model_path)
@@ -172,9 +199,11 @@ def evaluate_unet(args, model_path, dataset_name):
             print(f"[Feature {i}] MAE: {mae:.6f}, MSE: {mse:.6f}")
 
         # reshape 为 (N * C * T) 进行整体 MAE/MSE 计算
-        mse = mean_squared_error(all_trues.flatten(), all_preds.flatten())
-        mae = mean_absolute_error(all_trues.flatten(), all_preds.flatten())
-        print(f"[EVAL] {dataset_name} - MSE: {mse:.6f}, MAE: {mae:.6f}")
+        # mse = mean_squared_error(all_trues.flatten(), all_preds.flatten())
+        # mae = mean_absolute_error(all_trues.flatten(), all_preds.flatten())
+        avg_mae = np.mean(maes)
+        avg_mse = np.mean(mses)
+        print(f"[EVAL] {dataset_name} - MSE: {avg_mse:.6f}, MAE: {avg_mae:.6f}")
        
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -218,10 +247,10 @@ def create_argparser():
 
 def main():
     args = create_argparser().parse_args()
-    # model = train_unet(args)
-    for dataset_name in ['ETTh1', 'ETTh2', 'ETTm1', 'ETTm2']:
-        model_path = f"/home/zzx/projects/rrg-timsbc/zzx/LTSF_DDBM/diffusion/unet1d_{dataset_name}.pth"
-        evaluate_unet(args, model_path, dataset_name)
+    model = train_unet(args)
+    # for dataset_name in ['ETTh1', 'ETTh2', 'ETTm1', 'ETTm2']:
+    #     model_path = f"/home/zzx/projects/rrg-timsbc/zzx/LTSF_DDBM/diffusion/unet1d_{dataset_name}.pth"
+    #     evaluate_unet(args, model_path, dataset_name)
     
 
 if __name__ == "__main__":
